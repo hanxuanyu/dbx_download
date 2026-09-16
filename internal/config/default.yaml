@@ -1,0 +1,153 @@
+# =============================================================================
+#  dbxdl 配置文件 / dbxdl configuration
+#
+#  作用：把 DBX 的多个 CPU 架构安装包与官方插件统一下载到
+#  ./dbx<版本>/ 目录，并打包成一个 tar 包。
+#
+#  所有字段都有内置默认值，删除本文件后 `dbxdl download` 依然可以运行。
+#  生成/重置本文件：dbxdl config init
+#  查看当前生效配置：dbxdl config show
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# DBX 主程序发布源（GitHub Releases）
+# -----------------------------------------------------------------------------
+github:
+  owner: t8y2
+  repo: dbx
+  api_base: https://api.github.com
+  # 网站根地址，仅在 API 限额耗尽、回退解析 releases.atom 时使用。
+  web_base: https://github.com
+
+  # GitHub Token（可选）。留空时依次读取环境变量 GITHUB_TOKEN、GH_TOKEN。
+  # 匿名调用 GitHub API 限额为 60 次/小时；配置 Token 可提升到 5000 次/小时。
+  # 建议使用环境变量而不是写在这里，避免 Token 进入版本库。
+  token: ""
+
+  # 用正则筛选「DBX 应用」的 release tag。
+  # 注意：t8y2/dbx 同一个仓库里还有 packages-vX.Y.Z / agents-vX.Y.Z /
+  # agents-latest 等其他 tag 家族，必须过滤掉，否则 latest 会取错。
+  # 第一个捕获组即为版本号（不含前导 v）。
+  # 结尾的 -suffix 用于匹配预发布版本（如 v0.7.0-rc.1）；
+  # 该类版本只有在 include_prerelease 为 true 时才会被选中。
+  tag_pattern: '^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$'
+  # 是否允许预发布版本（如 v0.7.0-rc.1）参与 "latest" 评选。
+  include_prerelease: false
+  timeout: 60s
+
+# -----------------------------------------------------------------------------
+# 插件市场（dbx-store）元数据源
+#
+# 每个插件在 plugins/<插件ID>.json 中维护元数据，包含全部版本、
+# 各目标平台（target）的下载地址与 sha256 校验值。
+# -----------------------------------------------------------------------------
+store:
+  owner: t8y2
+  repo: dbx-store
+  ref: main
+  # 元数据通过 raw 内容读取，不消耗 GitHub API 限额。
+  # 使用镜像或 GitHub Enterprise 时可改为对应地址。
+  raw_base: https://raw.githubusercontent.com
+  plugins_path: plugins
+  timeout: 60s
+
+# -----------------------------------------------------------------------------
+# 下载行为
+# -----------------------------------------------------------------------------
+output:
+  # 输出根目录。最终会在其下生成 dbx<版本>/ 目录与 dbx<版本>.tar.gz
+  dir: "."
+
+  # 最外层目录名模板，{version} 会被替换为版本号（不含前导 v）
+  dir_name_template: "dbx{version}"
+
+  # 打包完成后是否保留 dbx<版本>/ 暂存目录。
+  # 默认 false：tar 包写入成功后自动删除该目录，只保留 tar 包。
+  # 注意：该目录会被整目录删除，若其中已有手工整理的内容，
+  #       请改用 --out-dir 指定新的输出目录，或用 --keep-dir 保留。
+  keep_dir: false
+
+  # true = 即使文件已存在且校验通过也重新下载
+  force: false
+
+  # 并发下载数
+  concurrency: 4
+
+  # 单个文件失败后的重试次数（指数退避）
+  retries: 3
+
+  # 校验 sha256。DBX 官方仅对部分产物提供 .sha256，
+  # 插件元数据则全部带 sha256；缺失时自动跳过校验并给出提示。
+  verify_sha256: true
+
+# -----------------------------------------------------------------------------
+# 打包
+# -----------------------------------------------------------------------------
+archive:
+  enabled: true
+  # tar.gz 或 tar
+  format: tar.gz
+
+  # 包内最外层目录名（不含扩展名），{version} 会被替换
+  name_template: "dbx{version}"
+
+  # gzip 压缩级别 1(最快)~9(最小)。包内多为已压缩文件（dmg/zip/tar.gz），
+  # 因此默认用 1 以节省时间。
+  gzip_level: 1
+
+  # 是否在 tar 包旁生成 <包名>.sha256 校验文件
+  sha256_sidecar: true
+
+# -----------------------------------------------------------------------------
+# 需要下载的 DBX 发行包（按「架构 / 安装形态」区分）
+#
+# selector 与 GitHub Release 的 asset 文件名匹配，支持 * ? 通配符，
+# {version} 会被替换为版本号。这 5 项即为默认的 5 种包类型。
+# -----------------------------------------------------------------------------
+assets:
+  - selector: "DBX_{version}_arm64.dmg"
+    description: "macOS (Apple Silicon) 安装包"
+  - selector: "DBX_{version}_x64-setup.exe"
+    description: "Windows x64 安装程序"
+  - selector: "DBX_{version}_arm64-browser-static.tar.gz"
+    description: "Linux arm64（browser static）"
+  - selector: "DBX_{version}_x64-portable.zip"
+    description: "Windows x64 免安装便携版"
+  - selector: "DBX_{version}_x64-browser-static.tar.gz"
+    description: "Linux x64（browser static）"
+
+# -----------------------------------------------------------------------------
+# 插件
+# -----------------------------------------------------------------------------
+plugins:
+  enabled: true
+
+  # 下载地址来源：
+  #   store  = 使用 dbx-store 元数据里的 url（dl.dbxio.com，官方签名分发）
+  #   github = 使用插件自身仓库的 release asset
+  #   auto   = 优先 store，失败后回退 github
+  source: store
+
+  # 插件在包内的目录，最终结构为 <版本目录>/plugins/<插件子目录>/<文件>
+  root: "plugins"
+
+  # 版本策略：
+  #   pinned = 使用每个 item 的 version 字段（为空则用该插件最新版）
+  #   latest = 忽略 item.version，全部取最新版
+  version_policy: pinned
+
+  # 需要下载的目标平台（对应元数据 artifacts[].target）
+  targets:
+    - linux-x64
+    - linux-arm64
+    - windows-x64
+
+  # dir 为插件在包内的子目录名；留空则直接使用插件 ID，例如
+  # io.github.t8y2.s3 -> <版本目录>/plugins/io.github.t8y2.s3/
+  items:
+    - id: io.github.t8y2.s3
+      version: "0.1.9"
+      dir: s3
+    - id: io.dbx.ssh
+      version: "0.4.76"
+      dir: ssh
