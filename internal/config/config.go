@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -18,13 +20,53 @@ import (
 	"dbxdl/internal/naming"
 )
 
-// DefaultFileName is the configuration file dbxdl looks for when --config is
-// not given.
+// DefaultFileName is the configuration file dbxdl looks for in the current
+// directory when --config is not given.
 const DefaultFileName = "config.yaml"
+
+// EnvConfig names the environment variable that points at a configuration
+// file. It is what makes a globally installed dbxdl behave identically in
+// every directory.
+const EnvConfig = "DBXDL_CONFIG"
+
+// EnvConfigHome names the environment variable that relocates the per-user
+// configuration directory (the XDG base directory specification).
+const EnvConfigHome = "XDG_CONFIG_HOME"
 
 // ErrNotFound is returned by Load when the configuration file does not exist.
 // Callers may fall back to the built-in defaults.
 var ErrNotFound = errors.New("config file not found")
+
+// SourceKind records where a configuration came from.
+type SourceKind string
+
+const (
+	// SourceFlag is the path passed with --config.
+	SourceFlag SourceKind = "flag"
+	// SourceEnv is the path named by $DBXDL_CONFIG.
+	SourceEnv SourceKind = "env"
+	// SourceCwd is ./config.yaml in the working directory.
+	SourceCwd SourceKind = "cwd"
+	// SourceUser is the per-user configuration file.
+	SourceUser SourceKind = "user"
+	// SourceDefault means no file was found and the built-in defaults apply.
+	SourceDefault SourceKind = "default"
+)
+
+// UserConfigPath returns the per-user configuration path:
+// $XDG_CONFIG_HOME/dbxdl/config.yaml, defaulting to
+// ~/.config/dbxdl/config.yaml. It returns "" when no home directory can be
+// determined.
+func UserConfigPath() string {
+	if dir := strings.TrimSpace(os.Getenv(EnvConfigHome)); dir != "" {
+		return filepath.Join(dir, "dbxdl", DefaultFileName)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "dbxdl", DefaultFileName)
+}
 
 // Duration is a time.Duration that unmarshals from a Go duration string
 // ("90s", "2m"), which is friendlier than raw nanoseconds in YAML.
@@ -64,8 +106,10 @@ type Config struct {
 	Plugins Plugins `yaml:"plugins"`
 
 	// Path records where the configuration was loaded from; it is not part of
-	// the YAML document.
-	Path string `yaml:"-"`
+	// the YAML document. It is empty when the built-in defaults are in use.
+	Path string `yaml:"-" json:"-"`
+	// Source records how the configuration was located. It is set by Resolve.
+	Source SourceKind `yaml:"-" json:"-"`
 }
 
 // GitHub locates the DBX application releases.
@@ -286,6 +330,81 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// Resolve loads the configuration dbxdl should use, searching in this order:
+//
+//  1. explicitPath, i.e. --config; a missing file is an error
+//  2. $DBXDL_CONFIG; a missing file is an error
+//  3. ./config.yaml in the working directory
+//  4. <user config dir>/dbxdl/config.yaml
+//  5. the built-in defaults
+//
+// Unlike Load it never returns ErrNotFound: the built-in defaults are a valid
+// outcome, reported through Config.Source.
+func Resolve(explicitPath string) (*Config, error) {
+	if p := strings.TrimSpace(explicitPath); p != "" {
+		cfg, err := loadFrom(p, SourceFlag)
+		if errors.Is(err, ErrNotFound) {
+			return nil, fmt.Errorf("config file %s does not exist", p)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return cfg, nil
+	}
+
+	if p := strings.TrimSpace(os.Getenv(EnvConfig)); p != "" {
+		cfg, err := loadFrom(p, SourceEnv)
+		if errors.Is(err, ErrNotFound) {
+			return nil, fmt.Errorf("config file %s does not exist (from $%s)", p, EnvConfig)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return cfg, nil
+	}
+
+	cfg, err := loadFrom(DefaultFileName, SourceCwd)
+	if err == nil {
+		return cfg, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+
+	if p := UserConfigPath(); p != "" {
+		cfg, err = loadFrom(p, SourceUser)
+		if err == nil {
+			return cfg, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+	}
+
+	fallback := Default()
+	fallback.Source = SourceDefault
+	return fallback, nil
+}
+
+// loadFrom reads one candidate location, tagging the result with its origin.
+func loadFrom(path string, source SourceKind) (*Config, error) {
+	cfg, err := Load(path)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Source = source
+	return cfg, nil
+}
+
+// SearchPath lists the locations Resolve consults, for help and error text.
+func SearchPath() []string {
+	paths := []string{DefaultFileName}
+	if p := UserConfigPath(); p != "" {
+		paths = append(paths, p)
+	}
+	return paths
 }
 
 // ApplyDefaults fills in fields that were omitted from the YAML document.

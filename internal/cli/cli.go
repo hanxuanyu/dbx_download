@@ -148,26 +148,24 @@ func setupLogger(log *ui.Logger, g *globalFlags, env Env) {
 	log.SetColor(ui.ShouldColor(env.Stderr, g.color) && !g.noColor)
 }
 
-// loadConfig reads the configuration, distinguishing "not created yet" from a
-// real error. Explicitly passing --config to a missing file is fatal.
+// loadConfig locates the configuration and reports which one was used.
+//
+// --config and $DBXDL_CONFIG must point at an existing file; otherwise the
+// search falls back to ./config.yaml, then the per-user file, then the built-in
+// defaults, so a globally installed dbxdl behaves the same everywhere.
 func loadConfig(g *globalFlags, log *ui.Logger) (*config.Config, error) {
-	cfg, err := config.Load(g.configPath)
-	if err == nil {
-		return cfg, nil
+	cfg, err := config.Resolve(g.configPath)
+	if err != nil {
+		return nil, err
 	}
-	if errors.Is(err, config.ErrNotFound) {
-		if g.configPath != "" {
-			return nil, fmt.Errorf("config file %s does not exist", g.configPath)
-		}
-		log.Infof("no %s found; using built-in defaults (run \"dbxdl config init\" to customize)",
-			config.DefaultFileName)
-		// Load already returned the built-in defaults.
-		if cfg == nil {
-			cfg = config.Default()
-		}
-		return cfg, nil
+	if cfg.Source == config.SourceDefault {
+		log.Infof("no configuration file found (looked at %s); using built-in defaults",
+			strings.Join(config.SearchPath(), ", "))
+		log.Infof("run \"dbxdl config init\" here, or set $%s, to customize", config.EnvConfig)
+	} else {
+		log.Debugf("configuration: %s (from %s)", cfg.Path, cfg.Source)
 	}
-	return nil, err
+	return cfg, nil
 }
 
 // fail reports an error and returns the conventional exit code.

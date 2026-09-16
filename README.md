@@ -39,11 +39,82 @@ dbx0.6.14.tar.gz.sha256                           <- 校验文件
 
 ```bash
 make build            # 产出 bin/dbxdl
-make install          # 安装到 $GOBIN
+make install          # 安装到 $PATH（默认 $(go env GOPATH)/bin）
 make test             # 运行全部单元测试
 ```
 
 也可以直接运行：`go run . download`。
+装到 PATH 后即可在任意目录使用，见下一节。
+
+## 安装到 PATH，在任意目录使用
+
+### 1. 把二进制放到 PATH 上
+
+```bash
+make install                            # 装到 $GOBIN；未设置则为 $(go env GOPATH)/bin
+make install GOBIN=$HOME/.local/bin     # 或者指定目录
+make install-dir                        # 只打印会装到哪里，不做任何改动
+```
+
+也可以不依赖 Go，直接复制构建产物：
+
+```bash
+make build && cp bin/dbxdl ~/.local/bin/
+```
+
+`make install` 会检查目标目录是否在 `$PATH` 中，不在就打印需要追加的 `export` 行。
+本机 `~/.zshrc` 第 117 行已有 `export PATH="${GOPATH:-$HOME/go}/bin:$PATH"`，
+所以默认落到 `~/go/bin` 无需再改 PATH。验证：
+
+```bash
+which dbxdl && dbxdl version
+```
+
+> 注意：若用 mise / asdf 管理 Go，`go env GOBIN` 可能指向工具链自身的 bin 目录
+> （本机为 `~/.local/share/mise/installs/go/1.26.5/bin`），装在那里会随工具链升级消失。
+> 建议显式指定：`make install GOBIN=$HOME/go/bin`。
+
+### 2. 让配置在任何目录都生效
+
+二进制上 PATH 之后，`dbxdl` 可在任何目录直接运行。配置按下列顺序查找，**第一个存在的生效**：
+
+| 顺序 | 位置 | 适用场景 |
+| --- | --- | --- |
+| 1 | `--config <path>` | 单次覆盖，必须存在 |
+| 2 | `$DBXDL_CONFIG` | 全局唯一配置，适合写进 `~/.zshrc` |
+| 3 | `./config.yaml` | 当前目录，适合在项目里固定参数 |
+| 4 | `$XDG_CONFIG_HOME/dbxdl/config.yaml`（默认 `~/.config/dbxdl/config.yaml`） | 跨目录的用户级配置 |
+| 5 | 内置默认值 | 与仓库里的 `config.yaml` 完全一致 |
+
+生成一份在任何目录都生效的用户级配置：
+
+```bash
+dbxdl config init --user     # -> ~/.config/dbxdl/config.yaml
+dbxdl config show            # 查看最终生效的配置及其来源
+```
+
+或者用环境变量指向某个文件（写进 `~/.zshrc`）：
+
+```bash
+export DBXDL_CONFIG="$HOME/.config/dbxdl/config.yaml"
+```
+
+`dbxdl config show` 会显示来源标记 `[flag]` / `[env]` / `[cwd]` / `[user]` / `[default]`
+以及完整查找顺序；`dbxdl config path` 打印当前生效的文件路径。
+注意 `--config` 与 `$DBXDL_CONFIG` 指向的文件若不存在会直接报错，不会静默退回默认值。
+
+### 3. 下载产物落在哪里
+
+`output.dir` 默认为 `.`，即**执行命令时所在的目录**。若想固定输出位置（例如统一放
+`~/Downloads/dbx`），在全局配置里写绝对路径：
+
+```yaml
+output:
+  dir: /Users/you/Downloads/dbx
+  keep_dir: false        # 打包成功后删除暂存目录，只留 tar
+```
+
+这样在任意目录执行 `dbxdl download` 都会把 `dbx<版本>.tar.gz` 放到同一处。
 
 ## 快速开始
 

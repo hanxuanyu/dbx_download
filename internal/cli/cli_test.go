@@ -323,3 +323,111 @@ func TestPluginsShowAcceptsTrailingFlags(t *testing.T) {
 		t.Errorf("the plugin id was not recognised as the positional argument: %q", stderr)
 	}
 }
+
+// TestConfigEnvVarIsHonoured checks that $DBXDL_CONFIG lets a global dbxdl pick
+// up one configuration from any working directory.
+func TestConfigEnvVarIsHonoured(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "global.yaml")
+	body := strings.Replace(config.DefaultYAML(), `repo: dbx`, "repo: from-env", 1)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvConfig, path)
+
+	// The command runs from a different directory, so the only way the file can
+	// be found is through the environment variable.
+	work := t.TempDir()
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(original) })
+
+	code, stdout, stderr := run(t, "config", "show", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, stderr)
+	}
+	var got config.Config
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if got.GitHub.Repo != "from-env" {
+		t.Errorf("repo = %q, want from-env (the $DBXDL_CONFIG file)", got.GitHub.Repo)
+	}
+}
+
+// TestConfigMissingEnvVarIsFatal makes sure a broken $DBXDL_CONFIG is reported
+// instead of silently falling back to the defaults.
+func TestConfigMissingEnvVarIsFatal(t *testing.T) {
+	t.Setenv(config.EnvConfig, filepath.Join(t.TempDir(), "absent.yaml"))
+	code, _, stderr := run(t, "list", "--limit", "1")
+	if code != 1 {
+		t.Errorf("exit %d, want 1", code)
+	}
+	if !strings.Contains(stderr, config.EnvConfig) {
+		t.Errorf("stderr should mention %s: %q", config.EnvConfig, stderr)
+	}
+}
+
+// TestConfigInitUserWritesToUserPath covers "config init --user".
+func TestConfigInitUserWritesToUserPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv(config.EnvConfig, "")
+
+	work := t.TempDir()
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(original) })
+
+	code, _, stderr := run(t, "config", "init", "--user")
+	if code != 0 {
+		t.Fatalf("exit %d (stderr: %s)", code, stderr)
+	}
+	want := filepath.Join(home, ".config", "dbxdl", config.DefaultFileName)
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("expected %s: %v", want, err)
+	}
+	// The command must not have created ./config.yaml as a side effect.
+	if _, err := os.Stat(filepath.Join(work, config.DefaultFileName)); !os.IsNotExist(err) {
+		t.Error("--user must not write ./config.yaml")
+	}
+
+	// config path then reports the resolved per-user file.
+	code, stdout, _ := run(t, "config", "path")
+	if code != 0 {
+		t.Fatalf("config path: exit %d", code)
+	}
+	if strings.TrimSpace(stdout) != want {
+		t.Errorf("config path = %q, want %q", strings.TrimSpace(stdout), want)
+	}
+}
+
+// TestConfigShowReportsSource documents the provenance line.
+func TestConfigShowReportsSource(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(config.DefaultYAML()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, _ := run(t, "config", "show", "--config", path)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(stdout, "[flag]") {
+		t.Errorf("config show should report where the file came from: %q", stdout)
+	}
+	if !strings.Contains(stdout, config.EnvConfig) {
+		t.Errorf("config show should mention $%s: %q", config.EnvConfig, stdout)
+	}
+}

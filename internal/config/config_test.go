@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -158,5 +159,155 @@ func TestArchiveFileName(t *testing.T) {
 	cfg.Archive.NameTemplate = "DBX-{version}-bundle"
 	if got := cfg.ArchiveFileName(v); got != "DBX-0.6.14-bundle.tar" {
 		t.Errorf("ArchiveFileName = %q, want DBX-0.6.14-bundle.tar", got)
+	}
+}
+
+// TestResolvePrefersExplicitPath covers the highest-priority source.
+func TestResolvePrefersExplicitPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom.yaml")
+	if err := os.WriteFile(path, []byte("github:\n  repo: from-flag\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Resolve(path)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Source != SourceFlag || cfg.GitHub.Repo != "from-flag" {
+		t.Errorf("Source = %q, repo = %q", cfg.Source, cfg.GitHub.Repo)
+	}
+}
+
+func TestResolveExplicitPathMustExist(t *testing.T) {
+	_, err := Resolve(filepath.Join(t.TempDir(), "absent.yaml"))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error = %v, want it to say the file does not exist", err)
+	}
+}
+
+// TestResolveUsesEnvVar covers $DBXDL_CONFIG, the mechanism that lets a
+// globally installed dbxdl share one configuration across directories.
+func TestResolveUsesEnvVar(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "global.yaml")
+	if err := os.WriteFile(path, []byte("github:\n  repo: from-env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvConfig, path)
+
+	cfg, err := Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Source != SourceEnv || cfg.GitHub.Repo != "from-env" {
+		t.Errorf("Source = %q, repo = %q", cfg.Source, cfg.GitHub.Repo)
+	}
+}
+
+func TestResolveEnvVarMustExist(t *testing.T) {
+	t.Setenv(EnvConfig, filepath.Join(t.TempDir(), "absent.yaml"))
+	_, err := Resolve("")
+	if err == nil {
+		t.Fatal("expected an error for a missing $DBXDL_CONFIG target")
+	}
+	if !strings.Contains(err.Error(), EnvConfig) {
+		t.Errorf("error = %v, want it to mention %s", err, EnvConfig)
+	}
+}
+
+// TestResolvePrefersWorkingDirectoryOverUserConfig documents the search order.
+func TestResolvePrefersWorkingDirectoryOverUserConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(EnvConfigHome, "")
+	t.Setenv(EnvConfig, "")
+
+	userPath := UserConfigPath()
+	if userPath != filepath.Join(home, ".config", "dbxdl", "config.yaml") {
+		t.Fatalf("UserConfigPath = %q", userPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte("github:\n  repo: from-user\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// With no ./config.yaml in the working directory the user file is used.
+	work := t.TempDir()
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(original) })
+
+	cfg, err := Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Source != SourceUser || cfg.GitHub.Repo != "from-user" {
+		t.Errorf("Source = %q, repo = %q", cfg.Source, cfg.GitHub.Repo)
+	}
+
+	// A ./config.yaml wins over the per-user file.
+	if err := os.WriteFile(filepath.Join(work, DefaultFileName), []byte("github:\n  repo: from-cwd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Source != SourceCwd || cfg.GitHub.Repo != "from-cwd" {
+		t.Errorf("Source = %q, repo = %q", cfg.Source, cfg.GitHub.Repo)
+	}
+}
+
+// TestResolveFallsBackToDefaults covers the "nothing configured" case.
+func TestResolveFallsBackToDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(EnvConfigHome, "")
+	t.Setenv(EnvConfig, "")
+
+	work := t.TempDir()
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(original) })
+
+	cfg, err := Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Source != SourceDefault {
+		t.Errorf("Source = %q, want %q", cfg.Source, SourceDefault)
+	}
+	if cfg.Path != "" {
+		t.Errorf("Path = %q, want empty for the built-in defaults", cfg.Path)
+	}
+	// Source is provenance metadata rather than a configured value, so it is
+	// normalized before comparing the actual settings.
+	got := *cfg
+	got.Source = ""
+	if !reflect.DeepEqual(got, *Default()) {
+		t.Error("Resolve should return the built-in defaults verbatim")
+	}
+}
+
+// TestUserConfigPathHonoursXDG checks the XDG override.
+func TestUserConfigPathHonoursXDG(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigHome, dir)
+	if got, want := UserConfigPath(), filepath.Join(dir, "dbxdl", DefaultFileName); got != want {
+		t.Errorf("UserConfigPath = %q, want %q", got, want)
 	}
 }

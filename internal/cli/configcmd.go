@@ -20,23 +20,37 @@ USAGE
   dbxdl config <init|show|path> [flags]
 
 SUBCOMMANDS
-  init            write the commented default configuration
+  init            write the commented default configuration (--user for a global one)
   show            print the configuration after defaults are applied
   path            print the configuration file path that would be used
 
 FLAGS
   --out <path>    (init) destination, default ./config.yaml
+  --user          (init) write to the per-user path instead
   --force         (init) overwrite an existing file
   --json          (show) emit JSON
 
+WHERE THE CONFIGURATION COMES FROM
+  The first existing file wins:
+
+    1. --config <path>                     (must exist)
+    2. $DBXDL_CONFIG                       (must exist)
+    3. ./config.yaml
+    4. $XDG_CONFIG_HOME/dbxdl/config.yaml  (default ~/.config/dbxdl/config.yaml)
+    5. built-in defaults
+
+  Setting $DBXDL_CONFIG (or creating the per-user file) is what lets a
+  globally installed dbxdl use the same settings from any directory.
+
 GLOBAL FLAGS
-  --config, -c <path>   configuration file (default ./config.yaml)
+  --config, -c <path>   configuration file
   --verbose             debug output
   --quiet               errors only
   --no-color            disable ANSI colors
 
 EXAMPLES
   dbxdl config init
+  dbxdl config init --user
   dbxdl config init --out build/dbxdl.yaml
   dbxdl config show
 `)
@@ -71,9 +85,11 @@ func runConfigInit(env Env, args []string, log *ui.Logger) int {
 	var (
 		out   string
 		force bool
+		user  bool
 	)
 	fs.StringVar(&out, "out", "", "destination path (default ./config.yaml)")
 	fs.BoolVar(&force, "force", false, "overwrite an existing file")
+	fs.BoolVar(&user, "user", false, "write to the per-user config path instead of ./config.yaml")
 	if _, stop, code := parseFlags(fs, env, args, configUsage); stop {
 		return code
 	}
@@ -81,9 +97,14 @@ func runConfigInit(env Env, args []string, log *ui.Logger) int {
 
 	path := out
 	if path == "" {
-		if g.configPath != "" {
+		switch {
+		case g.configPath != "":
 			path = g.configPath
-		} else {
+		case user:
+			if path = config.UserConfigPath(); path == "" {
+				return fail(log, env, fmt.Errorf("cannot determine a per-user config path; pass --out"))
+			}
+		default:
 			path = config.DefaultFileName
 		}
 	}
@@ -119,16 +140,9 @@ func runConfigShow(env Env, args []string, log *ui.Logger) int {
 	}
 	setupLogger(log, &g, env)
 
-	cfg, err := config.Load(g.configPath)
-	if err != nil && !errors.Is(err, config.ErrNotFound) {
+	cfg, err := config.Resolve(g.configPath)
+	if err != nil {
 		return fail(log, env, err)
-	}
-	if errors.Is(err, config.ErrNotFound) {
-		if cfg == nil {
-			cfg = config.Default()
-			cfg.Path = g.configPath
-		}
-		log.Infof("no %s found; showing built-in defaults", config.DefaultFileName)
 	}
 	if err := cfg.Validate(); err != nil {
 		return fail(log, env, err)
@@ -148,7 +162,9 @@ func runConfigShow(env Env, args []string, log *ui.Logger) int {
 	if source == "" {
 		source = "(built-in defaults)"
 	}
-	fmt.Fprintf(out, "\nconfig file: %s\n\n", source)
+	fmt.Fprintf(out, "\nconfig file: %s  [%s]\n\n", source, cfg.Source)
+	fmt.Fprintf(out, "search order: --config, $%s, %s\n\n",
+		config.EnvConfig, strings.Join(config.SearchPath(), ", "))
 	fmt.Fprintf(out, "github        %s/%s  api=%s  auth=%s\n",
 		cfg.GitHub.Owner, cfg.GitHub.Repo, cfg.GitHub.APIBase, authLabel(cfg.GitHub.Token))
 	fmt.Fprintf(out, "              tag_pattern=%s  prerelease=%v  timeout=%s\n",
@@ -197,9 +213,20 @@ func runConfigPath(env Env, args []string, log *ui.Logger) int {
 	}
 	setupLogger(log, &g, env)
 
-	path := g.configPath
+	cfg, err := config.Resolve(g.configPath)
+	if err != nil {
+		return fail(log, env, err)
+	}
+
+	path := cfg.Path
 	if path == "" {
-		path = config.DefaultFileName
+		// Nothing was found: point at the location a per-user file would take,
+		// which is what a user asking for the path usually wants to create.
+		path = config.UserConfigPath()
+		fmt.Fprintf(env.Stderr, "note: no configuration file found; using built-in defaults\n")
+	}
+	if path == "" {
+		return fail(log, env, fmt.Errorf("no configuration file and no home directory to place one in"))
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
